@@ -1,0 +1,8 @@
+[package]
+name = "bit_vector"
+version = "0.1.0"
+authors = ["Caleb Sander"]
+edition = "2018"
+
+[lib]
+path = "src/bit_vector.rs"

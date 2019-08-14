@@ -1,0 +1,9 @@
+[package]
+name = "permute"
+version = "0.1.0"
+authors = ["Caleb Sander"]
+edition = "2018"
+
+[lib]
+name = "permute"
+path = "src/permute.rs"
