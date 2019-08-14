@@ -45,7 +45,7 @@ impl<T: Clone> Iterator for PermuteIter<T> {
 		(self.items_left, Some(self.items_left))
 	}
 	fn count(self) -> usize {
-		Self::permutation_count(&self.elems)
+		self.items_left
 	}
 }
 impl<T: Clone> ExactSizeIterator for PermuteIter<T> {}
