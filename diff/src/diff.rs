@@ -1,5 +1,3 @@
-use std::slice;
-
 struct DiagonalResult {
 	insertion: bool,
 	start_b_index: usize,
@@ -9,18 +7,7 @@ struct DiagonalResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiffElement<'a, T> {
 	Same(usize),
-	Delete(usize),
-	Insert(&'a [T]),
-}
-
-fn join_slices<'a, T>(first: &'a [T], second: &'a [T]) -> &'a [T] {
-	let (first_start, first_len) = (first.as_ptr(), first.len());
-	unsafe {
-		if first_start.add(first_len) != second.as_ptr() {
-			panic!("Slices are not adjacent");
-		}
-		slice::from_raw_parts(first_start, first_len + second.len())
-	}
+	Change(usize, &'a [T]),
 }
 
 fn make_diff<'b, T: PartialEq>(
@@ -32,27 +19,37 @@ fn make_diff<'b, T: PartialEq>(
 	let mut diff = vec![];
 	let mut diagonal = frontiers.last().unwrap().len() - 1;
 	loop {
-		let frontier = frontiers.pop().unwrap();
-		let choice = &frontier[diagonal];
-		let start_b_index = choice.start_b_index;
-		let same_count = choice.end_b_index - start_b_index;
-		if same_count > 0 { diff.push(Same(same_count)) }
-		if frontiers.is_empty() { break }
+		// Combine consecutive insertions and deletions into a single Change,
+		// since they are interchangeable.
+		// We take 1 Same block (and its optional insertion/deletion) and then
+		// keep taking insertions/deletions until we hit a Same block.
+		let (mut deletions, mut insertions) = (0, 0);
+		let mut end_result = None;
+		loop {
+			let DiagonalResult { insertion, start_b_index, end_b_index } =
+				frontiers.last().unwrap()[diagonal];
+			match end_result {
+				Some(_) => if start_b_index < end_b_index { break }
+				None => end_result = Some((start_b_index, end_b_index - start_b_index)),
+			}
+			frontiers.pop();
+			// The first frontier cannot have an insertion or deletion
+			if frontiers.is_empty() { break }
 
-		if choice.insertion {
-			let inserted = slice::from_ref(&b[start_b_index - 1]);
-			match diff.last_mut() {
-				Some(Insert(ref mut slice)) => *slice = join_slices(inserted, *slice),
-				_ => diff.push(Insert(inserted)),
+			if insertion {
+				insertions += 1;
+				diagonal -= 1;
 			}
-			diagonal -= 1;
+			else { deletions += 1 }
+		};
+		let (end_b_index, same_count) = end_result.unwrap();
+		// same_count can only be 0 at the end of the diff
+		if same_count > 0 { diff.push(Same(same_count)) }
+		// deletions and insertions can both be 0 only at the start of the diff
+		if deletions + insertions > 0 {
+			diff.push(Change(deletions, &b[(end_b_index - insertions)..end_b_index]))
 		}
-		else {
-			match diff.last_mut() {
-				Some(Delete(ref mut count)) => *count += 1,
-				_ => diff.push(Delete(1)),
-			}
-		}
+		if frontiers.is_empty() { break }
 	}
 	diff.reverse();
 	return diff;
@@ -73,16 +70,15 @@ pub fn diff<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
 			};
 			let insertion = insert_b_index > delete_b_index;
 			let start_b_index =
-				if insertion { insert_b_index }
-				else { delete_b_index };
-			let mut a_index = start_b_index + diff_length - (diagonal << 1);
-			let mut b_index = start_b_index;
+				if insertion { insert_b_index } else { delete_b_index };
+			let mut end_a_index = start_b_index + diff_length - (diagonal << 1);
+			let mut end_b_index = start_b_index;
 			let done = loop {
-				match (a.get(a_index), b.get(b_index)) {
+				match (a.get(end_a_index), b.get(end_b_index)) {
 					(Some(a_elem), Some(b_elem)) => {
 						if a_elem == b_elem {
-							a_index += 1;
-							b_index += 1;
+							end_a_index += 1;
+							end_b_index += 1;
 						}
 						else { break false }
 					},
@@ -90,11 +86,7 @@ pub fn diff<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
 					(None, None) => break true,
 				}
 			};
-			frontier.push(DiagonalResult {
-				insertion,
-				start_b_index,
-				end_b_index: b_index,
-			});
+			frontier.push(DiagonalResult { insertion, start_b_index, end_b_index });
 			if done {
 				frontiers.push(frontier);
 				return make_diff(b, frontiers);
@@ -106,42 +98,64 @@ pub fn diff<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
 	}
 }
 
+pub fn diff_len<T>(diff: &Vec<DiffElement<'_, T>>) -> usize {
+	use DiffElement::*;
+
+	diff.into_iter()
+		.map(|element| match element {
+			Same(_) => 0,
+			Change(deletions, insertions) => deletions + insertions.len(),
+		})
+		.sum()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::slice;
 	use DiffElement::*;
 
-	fn diff_brute<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> (usize, Vec<DiffElement<'b, T>>) {
-		if a.is_empty() {
-			if b.is_empty() { (0, vec![]) } else { (b.len(), vec![Insert(b)]) }
+	fn join_slices<'a, T>(first: &'a [T], second: &'a [T]) -> &'a [T] {
+		let (first_start, first_len) = (first.as_ptr(), first.len());
+		unsafe {
+			if first_start.add(first_len) != second.as_ptr() {
+				panic!("Slices are not adjacent");
+			}
+			slice::from_raw_parts(first_start, first_len + second.len())
 		}
-		else if b.is_empty() { (a.len(), vec![Delete(a.len())]) }
+	}
+
+	fn diff_brute<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
+		if a.is_empty() {
+			if b.is_empty() { vec![] } else { vec![Change(0, b)] }
+		}
+		else if b.is_empty() { vec![Change(a.len(), &[])] }
 		else {
 			if a[0] == b[0] {
-				let (diff_count, mut diff_rest) = diff_brute(&a[1..], &b[1..]);
+				let mut diff_rest = diff_brute(&a[1..], &b[1..]);
 				match diff_rest.get_mut(0) {
 					Some(Same(ref mut count)) => *count += 1,
 					_ => diff_rest.insert(0, Same(1)),
 				}
-				(diff_count, diff_rest)
+				diff_rest
 			}
 			else {
-				let (diff_count_left, mut diff_rest_left) = diff_brute(&a[1..], b);
-				let (diff_count_right, mut diff_rest_right) = diff_brute(a, &b[1..]);
-				if diff_count_left < diff_count_right {
+				let mut diff_rest_left = diff_brute(&a[1..], b);
+				let mut diff_rest_right = diff_brute(a, &b[1..]);
+				if diff_len(&diff_rest_left) < diff_len(&diff_rest_right) {
 					match diff_rest_left.get_mut(0) {
-						Some(Delete(ref mut count)) => *count += 1,
-						_ => diff_rest_left.insert(0, Delete(1)),
+						Some(Change(ref mut count, _)) => *count += 1,
+						_ => diff_rest_left.insert(0, Change(1, &[])),
 					}
-					(diff_count_left + 1, diff_rest_left)
+					diff_rest_left
 				}
 				else {
 					let inserted = &b[..1];
 					match diff_rest_right.get_mut(0) {
-						Some(Insert(ref mut slice)) => *slice = join_slices(inserted, *slice),
-						_ => diff_rest_right.insert(0, Insert(inserted)),
+						Some(Change(_, ref mut slice)) => *slice = join_slices(inserted, *slice),
+						_ => diff_rest_right.insert(0, Change(0, inserted)),
 					}
-					(diff_count_right + 1, diff_rest_right)
+					diff_rest_right
 				}
 			}
 		}
@@ -151,9 +165,11 @@ mod tests {
 	fn test_same() {
 		let mut items = vec![];
 		assert_eq!(diff(&items, &items), vec![]);
+		assert_eq!(diff_brute(&items, &items), vec![]);
 		for i in 1..100 {
 			items.push(i);
 			assert_eq!(diff(&items, &items), vec![Same(i)]);
+			assert_eq!(diff_brute(&items, &items), vec![Same(i)]);
 		}
 	}
 
@@ -170,18 +186,18 @@ mod tests {
 				if insert1 > 0 { target_diff.push(Same(insert1)) }
 				if insert1 < insert2 {
 					target_diff.extend(&[
-						Insert(&inserts[..1]),
+						Change(0, &inserts[..1]),
 						Same(insert2 - insert1),
-						Insert(&inserts[1..]),
+						Change(0, &inserts[1..]),
 					])
 				}
-				else { target_diff.push(Insert(&inserts)) }
+				else { target_diff.push(Change(0, &inserts)) }
 				if insert2 < initial.len() {
 					target_diff.push(Same(initial.len() - insert2))
 				}
 				let diff_result = diff(&initial, &inserted);
 				assert_eq!(diff_result, target_diff);
-				assert_eq!(diff_result, diff_brute(&initial, &inserted).1);
+				assert_eq!(diff_result, diff_brute(&initial, &inserted));
 			}
 		}
 	}
@@ -197,15 +213,19 @@ mod tests {
 				let mut target_diff = vec![];
 				if delete1 > 0 { target_diff.push(Same(delete1)) }
 				if delete1 < delete2 {
-					target_diff.extend(&[Delete(1), Same(delete2 - delete1), Delete(1)])
+					target_diff.extend(&[
+						Change(1, &[]),
+						Same(delete2 - delete1),
+						Change(1, &[]),
+					])
 				}
-				else { target_diff.push(Delete(2)) }
+				else { target_diff.push(Change(2, &[])) }
 				if delete2 < initial.len() - 2 {
 					target_diff.push(Same(initial.len() - 2 - delete2))
 				}
 				let diff_result = diff(&initial, &deleted);
 				assert_eq!(diff_result, target_diff);
-				assert_eq!(diff_result, diff_brute(&initial, &deleted).1);
+				assert_eq!(diff_result, diff_brute(&initial, &deleted));
 			}
 		}
 	}
