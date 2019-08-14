@@ -11,11 +11,11 @@ fn test() {
 		assert!(fa.accepts(&s) == (len == 1));
 		s.push('é');
 	}
-	for &c in &['a', ' ', '☃'] {
+	for c in &['a', ' ', '☃'] {
 		s.clear();
 		for _ in 0..100 {
 			assert!(!fa.accepts(&s));
-			s.push(c);
+			s.push(*c);
 		}
 	}
 }

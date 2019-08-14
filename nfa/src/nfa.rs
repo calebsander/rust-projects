@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::vec::IntoIter;
+use bit_vector::BitVector;
 
 type NodeIndex = usize;
 enum NodeType {
@@ -26,12 +27,47 @@ struct DistinguishedNodes {
 	accept: NodeIndex,
 }
 
+struct NodeSet {
+	values: Vec<NodeIndex>,
+	present: BitVector,
+}
+impl NodeSet {
+	fn new(size: usize) -> Self {
+		let mut present = BitVector::with_capacity(size);
+		for _ in 0..size { present.push(false) }
+		NodeSet { values: vec![], present }
+	}
+
+	fn contains(&self, index: NodeIndex) -> bool {
+		self.present.get(index).unwrap()
+	}
+	fn insert(&mut self, index: NodeIndex) -> bool {
+		let contains = self.contains(index);
+		if !contains {
+			self.values.push(index);
+			self.present.set(index, true).unwrap();
+		}
+		contains
+	}
+	fn is_empty(&self) -> bool {
+		self.values.is_empty()
+	}
+}
+impl IntoIterator for NodeSet {
+	type Item = NodeIndex;
+	type IntoIter = IntoIter<NodeIndex>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.values.into_iter()
+	}
+}
+
 pub struct NFA {
 	nodes: Vec<Node>,
 	distinguished_nodes: DistinguishedNodes,
 }
 impl NFA {
-	fn add_reachable(&self, nodes: &mut HashSet<NodeIndex>, start: NodeIndex) {
+	fn add_reachable(&self, nodes: &mut NodeSet, start: NodeIndex) {
 		if nodes.insert(start) {
 			for node in &self.nodes[start].epsilon_transitions {
 				self.add_reachable(nodes, *node)
@@ -39,13 +75,13 @@ impl NFA {
 		}
 	}
 	pub fn accepts(&self, s: &str) -> bool {
-		let mut current_nodes = HashSet::new();
+		let mut current_nodes = NodeSet::new(self.nodes.len());
 		let DistinguishedNodes { start, accept } = self.distinguished_nodes;
 		self.add_reachable(&mut current_nodes, start);
 		for c in s.chars() {
-			let mut next_nodes = HashSet::new();
+			let mut next_nodes = NodeSet::new(self.nodes.len());
 			for node in current_nodes {
-				if let Some(next_node) = self.nodes[node].node.get_transition(c) {
+				for next_node in self.nodes[node].node.get_transition(c) {
 					self.add_reachable(&mut next_nodes, next_node)
 				}
 			}
@@ -53,7 +89,7 @@ impl NFA {
 
 			current_nodes = next_nodes;
 		}
-		current_nodes.contains(&accept)
+		current_nodes.contains(accept)
 	}
 }
 

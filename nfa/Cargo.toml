@@ -6,3 +6,6 @@ edition = "2018"
 
 [lib]
 path = "src/nfa.rs"
+
+[dependencies]
+bit_vector = { path = "../bit_vector" }
