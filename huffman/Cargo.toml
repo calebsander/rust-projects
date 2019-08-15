@@ -8,5 +8,4 @@ edition = "2018"
 path = "src/huffman.rs"
 
 [dependencies]
-priority_queue = { path = "../priority_queue" }
 bit_vector = { path = "../bit_vector" }

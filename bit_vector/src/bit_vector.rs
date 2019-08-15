@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+use std::fmt::{Debug, Formatter, Result};
 use std::iter::{FromIterator, IntoIterator};
 use std::mem;
 use std::ptr;
@@ -96,6 +98,48 @@ impl BitVector {
 	}
 	fn fill_word(value: bool) -> usize {
 		-(value as isize) as usize
+	}
+}
+
+impl Clone for BitVector {
+	fn clone(&self) -> Self {
+		BitVector {
+			len: self.len,
+			words: self.words[..Self::to_words_ceil(self.len)].to_vec()
+		}
+	}
+}
+
+impl Debug for BitVector {
+	fn fmt(&self, fmt: &mut Formatter) -> Result {
+		fmt.debug_list().entries(self.into_iter().map(|b| b as u8)).finish()
+	}
+}
+
+impl PartialEq for BitVector {
+	fn eq(&self, other: &Self) -> bool {
+		if self.len != other.len { return false }
+
+		let full_words = Self::to_word_index(self.len);
+		if self.words[..full_words] != other.words[..full_words] { return false }
+
+		let bit_compare_index = Self::from_word_index(full_words);
+		let extra_bits = self.len - bit_compare_index;
+		if extra_bits == 0 { return true }
+
+		let unset_bits = WORD_BITS - extra_bits;
+		self.words[full_words] << unset_bits == other.words[full_words] << unset_bits
+	}
+}
+impl Eq for BitVector {}
+impl Ord for BitVector {
+	fn cmp(&self, other: &Self) -> Ordering {
+		self.into_iter().cmp(other.into_iter())
+	}
+}
+impl PartialOrd for BitVector {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
 	}
 }
 
