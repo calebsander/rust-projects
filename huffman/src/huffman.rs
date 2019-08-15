@@ -5,6 +5,13 @@ use std::iter::{FromIterator, IntoIterator};
 use std::ops::Add;
 use bit_vector::BitVector;
 
+fn add_bit(bits: &BitVector, bit: bool) -> BitVector {
+	let mut new_bits = BitVector::with_capacity(bits.len() + 1);
+	new_bits.extend(bits);
+	new_bits.push(bit);
+	new_bits
+}
+
 enum EncodingTree<T> {
 	Leaf(T),
 	Inner(Box<Self>, Box<Self>),
@@ -13,6 +20,7 @@ struct UnrootedEncodingTree<T, F> {
 	tree: EncodingTree<T>,
 	frequency: F,
 }
+
 impl<T, F: PartialEq> PartialEq for UnrootedEncodingTree<T, F> {
 	fn eq(&self, other: &Self) -> bool {
 		self.frequency == other.frequency
@@ -32,26 +40,22 @@ impl<T, F: Ord> Ord for UnrootedEncodingTree<T, F> {
 
 pub struct HuffmanEncoding<T> {
 	encodings: HashMap<T, BitVector>,
-	decode_tree: EncodingTree<T>,
+	decode_tree: Option<EncodingTree<T>>,
 }
 
-impl<T: Hash + Eq + Clone> From<EncodingTree<T>> for HuffmanEncoding<T> {
-	fn from(decode_tree: EncodingTree<T>) -> Self {
-		let mut encodings = HashMap::new();
-		add_tree(&mut encodings, BitVector::new(), &decode_tree);
-		HuffmanEncoding { encodings, decode_tree }
-	}
-}
 impl<T: Hash + Eq + Clone, F: Ord + Add<Output=F>> From<HashMap<T, F>> for HuffmanEncoding<T> {
 	fn from(frequencies: HashMap<T, F>) -> Self {
 		use EncodingTree::*;
+
+		let mut result = Self::empty();
+		if frequencies.is_empty() { return result }
 
 		let mut by_frequency = BinaryHeap::new();
 		for (c, frequency) in frequencies {
 			by_frequency.push(UnrootedEncodingTree { tree: Leaf(c), frequency })
 		}
 		let root = loop {
-			let left = by_frequency.pop().expect("Cannot construct an empty huffman tree");
+			let left = by_frequency.pop().unwrap();
 			match by_frequency.pop() {
 				Some(right) =>
 					by_frequency.push(UnrootedEncodingTree {
@@ -61,7 +65,9 @@ impl<T: Hash + Eq + Clone, F: Ord + Add<Output=F>> From<HashMap<T, F>> for Huffm
 				None => break left.tree,
 			}
 		};
-		Self::from(root)
+		result.add_tree(BitVector::new(), &root);
+		result.decode_tree = Some(root);
+		result
 	}
 }
 impl<T: Hash + Eq + Clone> FromIterator<T> for HuffmanEncoding<T> {
@@ -77,11 +83,28 @@ impl<'a, T: 'a + Hash + Eq + Clone> FromIterator<&'a T> for HuffmanEncoding<T> {
 	}
 }
 impl<'a, T: 'a + Hash + Eq + Clone> HuffmanEncoding<T> {
+	fn empty() -> Self {
+		HuffmanEncoding { encodings: HashMap::new(), decode_tree: None }
+	}
+
 	pub fn decode<I: IntoIterator<Item=bool>>(&self, bits: I, count: usize) -> Vec<T> {
+		use EncodingTree::*;
+
+		if count == 0 { return vec![] } // decode_tree may be None
+
 		let mut iter = bits.into_iter();
-		let mut result = Vec::with_capacity(count);
-		for _ in 0..count { result.push(decode_from(&mut iter, &self.decode_tree)) }
-		result
+		let decode_tree = self.decode_tree.as_ref().expect("No huffman tree generated");
+		(0..count).map(|_| {
+			let mut sub_tree = decode_tree;
+			loop {
+				match sub_tree {
+					Leaf(c) => return c.clone(),
+					Inner(left, right) => sub_tree =
+						if iter.next().expect("Encoding is not long enough") { right }
+						else { left },
+				}
+			}
+		}).collect()
 	}
 	pub fn encode<V: IntoIterator<Item=T>>(&self, values: V) -> BitVector {
 		let mut bits = BitVector::new();
@@ -93,37 +116,19 @@ impl<'a, T: 'a + Hash + Eq + Clone> HuffmanEncoding<T> {
 		for c in values { bits.extend(&self.encodings[c]) }
 		bits
 	}
-}
 
-fn add_tree<T: Hash + Eq + Clone>(
-	encodings: &mut HashMap<T, BitVector>, prefix: BitVector, tree: &EncodingTree<T>
-) {
-	use EncodingTree::*;
+	fn add_tree(&mut self, prefix: BitVector, tree: &EncodingTree<T>) {
+		use EncodingTree::*;
 
-	match tree {
-		Leaf(c) => {
-			let existing_encoding = encodings.insert(c.clone(), prefix);
-			assert!(existing_encoding.is_none());
-		},
-		Inner(left, right) => {
-			let (mut prefix_zero, mut prefix_one) = (prefix.clone(), prefix.clone());
-			prefix_zero.push(false);
-			prefix_one.push(true);
-			add_tree(encodings, prefix_zero, left);
-			add_tree(encodings, prefix_one, right);
-		}
-	}
-}
-fn decode_from<T: Clone>(iter: &mut Iterator<Item=bool>, tree: &EncodingTree<T>) -> T {
-	use EncodingTree::*;
-
-	match tree {
-		Leaf(c) => c.clone(),
-		Inner(left, right) => {
-			let child =
-				if iter.next().expect("Encoding is not long enough") { right }
-				else { left };
-			decode_from(iter, child)
+		match tree {
+			Leaf(c) => {
+				let existing_encoding = self.encodings.insert(c.clone(), prefix);
+				assert!(existing_encoding.is_none());
+			},
+			Inner(left, right) => {
+				self.add_tree(add_bit(&prefix, false), left);
+				self.add_tree(add_bit(&prefix, true), right);
+			}
 		}
 	}
 }
@@ -144,5 +149,12 @@ mod tests {
 			.map(|c| c == '1');
 		assert_eq!(encoded, BitVector::from_iter(expected));
 		assert_eq!(huffman_tree.decode(encoded, text.len()), text.chars().collect::<Vec<_>>());
+	}
+
+	#[test]
+	fn test_empty() {
+		let huffman_tree = HuffmanEncoding::<u8>::from_iter(&[]);
+		assert_eq!(huffman_tree.encode(vec![]), BitVector::new());
+		assert_eq!(huffman_tree.decode(BitVector::new(), 0), vec![]);
 	}
 }

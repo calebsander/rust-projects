@@ -101,26 +101,25 @@ pub fn diff<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
 pub fn diff_len<T>(diff: &[DiffElement<T>]) -> usize {
 	use DiffElement::*;
 
-	diff.into_iter()
-		.map(|element| match element {
-			Same(_) => 0,
-			Change(deletions, insertions) => deletions + insertions.len(),
-		})
-		.sum()
+	let mut len = 0;
+	for element in diff {
+		if let Change(deletions, insertions) = element {
+			len += deletions + insertions.len()
+		}
+	}
+	len
 }
 
 pub fn apply_patch<T: Clone>(mut a: &[T], patch: &[DiffElement<T>]) -> Vec<T> {
 	use DiffElement::*;
 
-	let length_change: isize = patch.into_iter()
-		.map(|element| match element {
-			Same(_) => 0,
-			Change(deletions, insertions) =>
-				insertions.len() as isize - *deletions as isize,
-		})
-		.sum();
-	let mut result =
-		Vec::with_capacity((a.len() as isize + length_change) as usize);
+	let mut new_length = a.len() as isize;
+	for element in patch {
+		if let Change(deletions, insertions) = element {
+			new_length += insertions.len() as isize - *deletions as isize
+		}
+	}
+	let mut result = Vec::with_capacity(new_length as usize);
 	for element in patch {
 		match element {
 			Same(count) => {
@@ -134,6 +133,7 @@ pub fn apply_patch<T: Clone>(mut a: &[T], patch: &[DiffElement<T>]) -> Vec<T> {
 			},
 		}
 	}
+	assert!(a.is_empty());
 	result
 }
 
@@ -184,7 +184,8 @@ mod tests {
 				else {
 					let inserted = &b[..1];
 					match diff_rest_right.get_mut(0) {
-						Some(Change(_, ref mut slice)) => *slice = join_slices(inserted, *slice),
+						Some(Change(_, ref mut slice)) =>
+							*slice = join_slices(inserted, *slice),
 						_ => diff_rest_right.insert(0, Change(0, inserted)),
 					}
 					diff_rest_right
@@ -200,8 +201,10 @@ mod tests {
 		assert_eq!(diff_brute(&items, &items), []);
 		for i in 1..100 {
 			items.push(i);
-			assert_eq!(diff(&items, &items), [Same(i)]);
-			assert_eq!(diff_brute(&items, &items), [Same(i)]);
+			let diff_result = diff(&items, &items);
+			assert_eq!(diff_result, [Same(i)]);
+			assert_eq!(diff_result, diff_brute(&items, &items));
+			assert_eq!(apply_patch(&items, &diff_result), items);
 		}
 	}
 
@@ -230,6 +233,7 @@ mod tests {
 				let diff_result = diff(&initial, &inserted);
 				assert_eq!(diff_result, target_diff);
 				assert_eq!(diff_result, diff_brute(&initial, &inserted));
+				assert_eq!(apply_patch(&initial, &diff_result), inserted);
 			}
 		}
 	}
@@ -258,6 +262,7 @@ mod tests {
 				let diff_result = diff(&initial, &deleted);
 				assert_eq!(diff_result, target_diff);
 				assert_eq!(diff_result, diff_brute(&initial, &deleted));
+				assert_eq!(apply_patch(&initial, &diff_result), deleted);
 			}
 		}
 	}
@@ -365,5 +370,6 @@ important new additions
 to this document."
 			)),
 		]);
+		assert_eq!(apply_patch(&original, &diff_result), new);
 	}
 }
