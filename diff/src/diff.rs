@@ -12,12 +12,12 @@ pub enum DiffElement<'a, T> {
 
 fn make_diff<'b, T: PartialEq>(
 	b: &'b [T],
-	mut frontiers: Vec<Vec<DiagonalResult>>
+	mut frontiers: Vec<Vec<DiagonalResult>>,
+	mut diagonal: usize,
 ) -> Vec<DiffElement<'b, T>> {
 	use DiffElement::*;
 
 	let mut diff = vec![];
-	let mut diagonal = frontiers.last().unwrap().len() - 1;
 	loop {
 		// Combine consecutive insertions and deletions into a single Change,
 		// since they are interchangeable.
@@ -89,7 +89,7 @@ pub fn diff<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
 			frontier.push(DiagonalResult { insertion, start_b_index, end_b_index });
 			if done {
 				frontiers.push(frontier);
-				return make_diff(b, frontiers);
+				return make_diff(b, frontiers, diagonal);
 			}
 
 			insert_b_index = delete_b_index + 1;
@@ -98,7 +98,7 @@ pub fn diff<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
 	}
 }
 
-pub fn diff_len<T>(diff: &Vec<DiffElement<'_, T>>) -> usize {
+pub fn diff_len<T>(diff: &[DiffElement<T>]) -> usize {
 	use DiffElement::*;
 
 	diff.into_iter()
@@ -107,6 +107,34 @@ pub fn diff_len<T>(diff: &Vec<DiffElement<'_, T>>) -> usize {
 			Change(deletions, insertions) => deletions + insertions.len(),
 		})
 		.sum()
+}
+
+pub fn apply_patch<T: Clone>(mut a: &[T], patch: &[DiffElement<T>]) -> Vec<T> {
+	use DiffElement::*;
+
+	let length_change: isize = patch.into_iter()
+		.map(|element| match element {
+			Same(_) => 0,
+			Change(deletions, insertions) =>
+				insertions.len() as isize - *deletions as isize,
+		})
+		.sum();
+	let mut result =
+		Vec::with_capacity((a.len() as isize + length_change) as usize);
+	for element in patch {
+		match element {
+			Same(count) => {
+				let (same, rest) = a.split_at(*count);
+				result.extend_from_slice(same);
+				a = rest;
+			},
+			Change(deletions, insertions) => {
+				result.extend_from_slice(insertions);
+				a = &a[*deletions..];
+			},
+		}
+	}
+	result
 }
 
 #[cfg(test)]
@@ -123,6 +151,10 @@ mod tests {
 			}
 			slice::from_raw_parts(first_start, first_len + second.len())
 		}
+	}
+
+	fn to_lines(lines: &str) -> Vec<&str> {
+		lines.split('\n').collect()
 	}
 
 	fn diff_brute<'b, T: PartialEq>(a: &[T], b: &'b [T]) -> Vec<DiffElement<'b, T>> {
@@ -164,12 +196,12 @@ mod tests {
 	#[test]
 	fn test_same() {
 		let mut items = vec![];
-		assert_eq!(diff(&items, &items), vec![]);
-		assert_eq!(diff_brute(&items, &items), vec![]);
+		assert_eq!(diff(&items, &items), []);
+		assert_eq!(diff_brute(&items, &items), []);
 		for i in 1..100 {
 			items.push(i);
-			assert_eq!(diff(&items, &items), vec![Same(i)]);
-			assert_eq!(diff_brute(&items, &items), vec![Same(i)]);
+			assert_eq!(diff(&items, &items), [Same(i)]);
+			assert_eq!(diff_brute(&items, &items), [Same(i)]);
 		}
 	}
 
@@ -228,5 +260,110 @@ mod tests {
 				assert_eq!(diff_result, diff_brute(&initial, &deleted));
 			}
 		}
+	}
+
+	#[test]
+	fn test_examples() {
+		// From http://www.xmailserver.org/diff2.pdf
+		let a = vec!['a', 'b', 'c', 'a', 'b', 'b', 'a'];
+		let b = vec!['c', 'b',      'a', 'b',      'a', 'c'];
+		let diff_result = diff(&a, &b);
+		assert_eq!(diff_len(&diff_result), 5);
+		assert_eq!(apply_patch(&a, &diff_result), b);
+
+		// From https://en.wikipedia.org/wiki/Diff#Algorithm
+		let diff_result = diff(
+			&['a', 'b', 'c', 'd',      'f', 'g', 'h', 'j', 'q',                'z'],
+			&['a', 'b', 'c', 'd', 'e', 'f', 'g', 'i', 'j', 'k', 'r', 'x', 'y', 'z'],
+		);
+		assert_eq!(diff_result, [
+			Same(4),
+			Change(0, &['e']),
+			Same(2),
+			Change(1, &['i']),
+			Same(1),
+			Change(1, &['k', 'r', 'x', 'y']),
+			Same(1),
+		]);
+
+		let original = to_lines(
+"This part of the
+document has stayed the
+same from version to
+version.  It shouldn't
+be shown if it doesn't
+change.  Otherwise, that
+would not be helping to
+compress the size of the
+changes.
+
+This paragraph contains
+text that is outdated.
+It will be deleted in the
+near future.
+
+It is important to spell
+check this dokument. On
+the other hand, a
+misspelled word isn't
+the end of the world.
+Nothing in the rest of
+this paragraph needs to
+be changed. Things can
+be added after it."
+		);
+		let new = to_lines(
+"This is an important
+notice! It should
+therefore be located at
+the beginning of this
+document!
+
+This part of the
+document has stayed the
+same from version to
+version.  It shouldn't
+be shown if it doesn't
+change.  Otherwise, that
+would not be helping to
+compress the size of the
+changes.
+
+It is important to spell
+check this document. On
+the other hand, a
+misspelled word isn't
+the end of the world.
+Nothing in the rest of
+this paragraph needs to
+be changed. Things can
+be added after it.
+
+This paragraph contains
+important new additions
+to this document."
+		);
+		let diff_result = diff(&original, &new);
+		assert_eq!(diff_result, [
+			Change(0, &to_lines(
+"This is an important
+notice! It should
+therefore be located at
+the beginning of this
+document!
+"
+			)),
+			Same(10),
+			Change(5, &[]),
+			Same(1),
+			Change(1, &["check this document. On"]),
+			Same(7),
+			Change(0, &to_lines(
+"
+This paragraph contains
+important new additions
+to this document."
+			)),
+		]);
 	}
 }
