@@ -50,10 +50,9 @@ impl<T: Hash + Eq + Clone, F: Ord + Add<Output=F>> From<HashMap<T, F>> for Huffm
 		let mut result = Self::empty();
 		if frequencies.is_empty() { return result }
 
-		let mut by_frequency = BinaryHeap::new();
-		for (c, frequency) in frequencies {
-			by_frequency.push(UnrootedEncodingTree { tree: Leaf(c), frequency })
-		}
+		let mut by_frequency: BinaryHeap<_> = frequencies.into_iter()
+			.map(|(c, frequency)| UnrootedEncodingTree { tree: Leaf(c), frequency })
+			.collect();
 		let root = loop {
 			let left = by_frequency.pop().unwrap();
 			match by_frequency.pop() {
