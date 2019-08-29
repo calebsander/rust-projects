@@ -353,6 +353,56 @@ fn from_json_recursive(json: &str) -> Result<JSONValue, &'static str> {
 	from_json_recursive_pos(skip_whitespace(&mut pos)?, &mut pos)
 }
 
+fn write_string(string: &str, json: &mut String) {
+	json.push('"');
+	let (mut start_index, mut index) = (0, 0);
+	while let Some(c) = string.as_bytes().get(index).copied() {
+		if c == b'"' || c == b'\\' {
+			*json += &string[start_index..index];
+			start_index = index + 1;
+			json.push('\\');
+			json.push(c as char);
+		}
+		index += 1;
+	}
+	*json += &string[start_index..];
+	json.push('"');
+}
+fn write_json_value(value: &JSONValue, json: &mut String) {
+	use JSONValue::*;
+
+	match value {
+		Null => *json += "null",
+		Boolean(false) => *json += "false",
+		Boolean(true) => *json += "true",
+		Number(number) => *json += &*number.to_string(),
+		String(string) => write_string(string, json),
+		Array(array) => {
+			json.push('[');
+			for (i, value) in array.iter().enumerate() {
+				if i > 0 { json.push(',') }
+				write_json_value(value, json);
+			}
+			json.push(']');
+		},
+		Object(object) => {
+			json.push('{');
+			for (i, (key, value)) in object.iter().enumerate() {
+				if i > 0 { json.push(',') }
+				write_string(key, json);
+				json.push(':');
+				write_json_value(value, json);
+			}
+			json.push('}');
+		}
+	}
+}
+pub fn to_json(value: &JSONValue) -> String {
+	let mut json = String::new();
+	write_json_value(value, &mut json);
+	json
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
