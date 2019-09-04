@@ -1,6 +1,5 @@
 use std::char;
 use std::collections::HashMap;
-use std::mem;
 
 const UNICODE_HEX_LENGTH: usize = 4;
 
@@ -9,27 +8,17 @@ pub enum JSONValue {
 	Null,
 	Boolean(bool),
 	Number(f64),
-	String(String),
-	Array(Vec<JSONValue>),
-	Object(HashMap<String, JSONValue>),
+	String(Box<str>),
+	Array(Box<[JSONValue]>),
+	Object(HashMap<Box<str>, JSONValue>),
 }
 
-struct ParsingArrayState {
-	array: Vec<JSONValue>,
-	read_comma: bool,
-}
+impl Eq for JSONValue {} // JSON does not allow NaN values, so reflexivity holds
+
 enum ObjectState {
 	BeforeField,
-	BeforeValue(String),
+	BeforeValue(Box<str>),
 	AfterValue,
-}
-struct ParsingObjectState {
-	object: HashMap<String, JSONValue>,
-	state: ObjectState,
-}
-enum ParseState {
-	ParsingArray(ParsingArrayState),
-	ParsingObject(ParsingObjectState),
 }
 
 struct StrPosition<'a> {
@@ -37,6 +26,11 @@ struct StrPosition<'a> {
 	index: usize,
 }
 
+impl<'a> StrPosition<'a> {
+	fn new(string: &'a str) -> Self {
+		StrPosition { string, index: 0 }
+	}
+}
 impl Iterator for StrPosition<'_> {
 	type Item = u8;
 
@@ -47,12 +41,12 @@ impl Iterator for StrPosition<'_> {
 	}
 }
 
-fn parse_string(pos: &mut StrPosition) -> Result<String, &'static str> {
+fn parse_string(pos: &mut StrPosition) -> Result<Box<str>, &'static str> {
 	let mut start_pos = pos.index;
 	let mut result = String::new();
 	while let Some(c) = pos.next() {
 		if c == b'\\' {
-			result.push_str(&pos.string[start_pos..(pos.index - 1)]);
+			result += &pos.string[start_pos..(pos.index - 1)];
 			start_pos = pos.index + 1;
 			let c = pos.next().ok_or("Missing character after escape")?;
 			result.push(match c {
@@ -65,9 +59,9 @@ fn parse_string(pos: &mut StrPosition) -> Result<String, &'static str> {
 				b'u' => {
 					let mut code_point = 0;
 					for _ in 0..UNICODE_HEX_LENGTH {
-						let hex_digit = pos.next().and_then(|c| (c as char).to_digit(16))
-							.ok_or("Invalid unicode escape")?;
-						code_point = code_point << 4 | hex_digit;
+						code_point = code_point << 4 |
+							pos.next().and_then(|c| (c as char).to_digit(16))
+								.ok_or("Invalid unicode escape")?
 					}
 					start_pos += UNICODE_HEX_LENGTH;
 					char::from_u32(code_point).ok_or("Invalid unicode escape")?
@@ -76,8 +70,8 @@ fn parse_string(pos: &mut StrPosition) -> Result<String, &'static str> {
 			});
 		}
 		else if c == b'"' {
-			result.push_str(&pos.string[start_pos..(pos.index - 1)]);
-			return Ok(result);
+			result += &pos.string[start_pos..(pos.index - 1)];
+			return Ok(result.into());
 		}
 	}
 	Err("Expected end of string")
@@ -94,188 +88,34 @@ fn skip_whitespace(pos: &mut StrPosition) -> Result<u8, &'static str> {
 }
 
 fn is_number_char(c: u8) -> bool {
-	c == b'+' || c == b'-' || b'0' <= c && c <= b'9' ||
-	c == b'.' || c == b'E' || c == b'e'
-}
-
-fn combine(state_stack: &mut Vec<ParseState>, value: JSONValue) -> Option<JSONValue> {
-	use ParseState::*;
-	use ObjectState::*;
-
-	match state_stack.last_mut() {
-		Some(ParsingArray(state)) => {
-			state.array.push(value);
-			state.read_comma = false;
-			None
-		},
-		Some(ParsingObject(ParsingObjectState { object, state })) => {
-			let field = match mem::replace(state, AfterValue) {
-				BeforeValue(field) => field,
-				_ => unreachable!(),
-			};
-			object.insert(field, value);
-			None
-		},
-		None => Some(value),
-	}
-}
-
-fn parse_value(c: u8, pos: &mut StrPosition, state_stack: &mut Vec<ParseState>)
-	-> Result<Option<JSONValue>, &'static str>
-{
-	use JSONValue::*;
-	use ParseState::*;
-
 	match c {
-		b'n' => {
-			if pos.take(3).ne("ull".bytes()) { return Err("Expected JSON value") }
-			Ok(combine(state_stack, Null))
-		},
-		b'f' => {
-			if pos.take(4).ne("alse".bytes()) { return Err("Expected JSON value") }
-			Ok(combine(state_stack, Boolean(false)))
-		},
-		b't' => {
-			if pos.take(3).ne("rue".bytes()) { return Err("Expected JSON value") }
-			Ok(combine(state_stack, Boolean(true)))
-		},
-		b'"' => parse_string(pos).map(|string| combine(state_stack, String(string))),
-		b'[' => {
-			state_stack.push(ParsingArray(ParsingArrayState {
-				array: vec![],
-				read_comma: true,
-			}));
-			Ok(None)
-		},
-		b'{' => {
-			state_stack.push(ParsingObject(ParsingObjectState {
-				object: HashMap::new(),
-				state: ObjectState::BeforeField,
-			}));
-			Ok(None)
-		},
-		_ => {
-			if !is_number_char(c) { return Err("Expected JSON value") }
-			let number_start_index = pos.index - 1;
-			while let Some(c) = pos.next() {
-				if !is_number_char(c) { break }
-			}
-			pos.index -= 1;
-			match pos.string[number_start_index..pos.index].parse() {
-				Ok(number) => Ok(combine(state_stack, Number(number))),
-				Err(_) => Err("Invalid number")
-			}
-		},
+		b'+' | b'-' | b'0'..=b'9' | b'.' | b'E' | b'e' => true,
+		_ => false,
 	}
 }
 
-fn finish_array(state_stack: &mut Vec<ParseState>) -> Option<JSONValue> {
-	match state_stack.pop() {
-		Some(ParseState::ParsingArray(state)) =>
-			combine(state_stack, JSONValue::Array(state.array)),
-		_ => unreachable!(),
-	}
-}
-fn finish_object(state_stack: &mut Vec<ParseState>) -> Option<JSONValue> {
-	match state_stack.pop() {
-		Some(ParseState::ParsingObject(state)) =>
-			combine(state_stack, JSONValue::Object(state.object)),
-		_ => unreachable!(),
-	}
+fn next_chars_match(pos: &mut StrPosition, chars: &[u8]) -> bool {
+	chars.iter().copied().all(|c| pos.next() == Some(c))
 }
 
-pub fn from_json(json: &str) -> Result<JSONValue, &'static str> {
-	use ParseState::*;
-	use ObjectState::*;
-
-	let mut state_stack = vec![];
-	let mut pos = StrPosition { string: json, index: 0 };
-	let value = loop {
-		let c = skip_whitespace(&mut pos)?;
-		match state_stack.last_mut() {
-			Some(ParsingArray(ParsingArrayState { array, read_comma })) => match c {
-				b',' => {
-					if *read_comma {
-						return Err(
-							if array.is_empty() { "Expected ']' or value" }
-							else { "Expected value" }
-						)
-					}
-					*read_comma = true;
-				},
-				b']' => {
-					if *read_comma && !array.is_empty() {
-						return Err("Expected value")
-					}
-					if let Some(value) = finish_array(&mut state_stack) {
-						break value
-					}
-				},
-				_ => {
-					if !*read_comma { return Err("Expected ','") }
-					if let Some(value) = parse_value(c, &mut pos, &mut state_stack)? {
-						break value
-					}
-				},
-			},
-			Some(ParsingObject(ParsingObjectState { object, state })) => match state {
-				BeforeField => match c {
-					b'"' => {
-						*state = BeforeValue(parse_string(&mut pos)?);
-						if skip_whitespace(&mut pos)? != b':' { return Err("Expected ':'") }
-					},
-					b'}' => {
-						if !object.is_empty() { return Err("Expected '\"'") }
-						if let Some(value) = finish_object(&mut state_stack) {
-							break value
-						}
-					},
-					_ => return Err(
-						if object.is_empty() { "Expected '\"' or '}'" }
-						else { "Expected '\"'" }
-					),
-				},
-				BeforeValue(_) =>
-					if let Some(value) = parse_value(c, &mut pos, &mut state_stack)? {
-						break value
-					},
-				AfterValue => match c {
-					b',' => *state = BeforeField,
-					b'}' =>
-						if let Some(value) = finish_object(&mut state_stack) {
-							break value
-						},
-					_ => return Err("Expected ',' or '}'"),
-				},
-			},
-			_ =>
-				if let Some(value) = parse_value(c, &mut pos, &mut state_stack)? {
-					break value
-				},
-		}
-	};
-	if skip_whitespace(&mut pos).is_ok() { Err("Expected end of JSON") }
-	else { Ok(value) }
-}
-
-fn from_json_recursive_pos(c: u8, pos: &mut StrPosition) -> Result<JSONValue, &'static str> {
+fn from_json_pos(c: u8, pos: &mut StrPosition) -> Result<JSONValue, &'static str> {
 	use JSONValue::*;
 	use ObjectState::*;
 
 	match c {
 		b'n' => {
-			if pos.take(3).ne("ull".bytes()) { return Err("Expected JSON value") }
+			if !next_chars_match(pos, b"ull") { return Err("Expected JSON value") }
 			Ok(Null)
 		},
 		b'f' => {
-			if pos.take(4).ne("alse".bytes()) { return Err("Expected JSON value") }
+			if !next_chars_match(pos, b"alse") { return Err("Expected JSON value") }
 			Ok(Boolean(false))
 		},
 		b't' => {
-			if pos.take(3).ne("rue".bytes()) { return Err("Expected JSON value") }
+			if !next_chars_match(pos, b"rue") { return Err("Expected JSON value") }
 			Ok(Boolean(true))
 		},
-		b'"' => parse_string(pos).map(|string| String(string)),
+		b'"' => parse_string(pos).map(String),
 		b'[' => {
 			let mut array = vec![];
 			let mut read_comma = true;
@@ -290,16 +130,18 @@ fn from_json_recursive_pos(c: u8, pos: &mut StrPosition) -> Result<JSONValue, &'
 						}
 						read_comma = true;
 					},
-					b']' => break
-						if read_comma && !array.is_empty() { Err("Expected value") }
-						else { Ok(Array(array)) },
+					b']' => {
+						if read_comma && !array.is_empty() { return Err("Expected value") }
+						break;
+					},
 					c => {
 						if !read_comma { return Err("Expected ','") }
-						array.push(from_json_recursive_pos(c, pos)?);
+						array.push(from_json_pos(c, pos)?);
 						read_comma = false;
 					},
 				}
 			}
+			Ok(Array(array.into()))
 		},
 		b'{' => {
 			let mut object = HashMap::new();
@@ -322,7 +164,7 @@ fn from_json_recursive_pos(c: u8, pos: &mut StrPosition) -> Result<JSONValue, &'
 						),
 					},
 					BeforeValue(field) => {
-						object.insert(field, from_json_recursive_pos(c, pos)?);
+						object.insert(field, from_json_pos(c, pos)?);
 						state = AfterValue;
 					},
 					AfterValue => match c {
@@ -337,76 +179,85 @@ fn from_json_recursive_pos(c: u8, pos: &mut StrPosition) -> Result<JSONValue, &'
 		_ => {
 			if !is_number_char(c) { return Err("Expected JSON value") }
 			let number_start_index = pos.index - 1;
-			while let Some(c) = pos.next() {
-				if !is_number_char(c) { break }
+			loop {
+				match pos.next() {
+					Some(c) if is_number_char(c) => {},
+					_ => break,
+				}
 			}
 			pos.index -= 1;
 			match pos.string[number_start_index..pos.index].parse() {
 				Ok(number) => Ok(Number(number)),
-				Err(_) => Err("Invalid number")
+				Err(_) => Err("Invalid number"),
 			}
 		},
 	}
 }
-fn from_json_recursive(json: &str) -> Result<JSONValue, &'static str> {
-	let mut pos = StrPosition { string: json, index: 0 };
-	from_json_recursive_pos(skip_whitespace(&mut pos)?, &mut pos)
+pub fn from_json(json: &str) -> Result<JSONValue, &'static str> {
+	let mut pos = StrPosition::new(json);
+	let value = from_json_pos(skip_whitespace(&mut pos)?, &mut pos)?;
+	if skip_whitespace(&mut pos).is_ok() { Err("Expected end of JSON") }
+	else { Ok(value) }
 }
 
-fn write_string(string: &str, json: &mut String) {
-	json.push('"');
-	let (mut start_index, mut index) = (0, 0);
-	while let Some(c) = string.as_bytes().get(index).copied() {
+fn write_string(string: &str, json: &mut Vec<u8>) {
+	json.push(b'"');
+	let mut start_index = 0;
+	for (index, c) in string.bytes().enumerate() {
 		if c == b'"' || c == b'\\' {
-			*json += &string[start_index..index];
+			json.extend_from_slice(string[start_index..index].as_bytes());
 			start_index = index + 1;
-			json.push('\\');
-			json.push(c as char);
+			json.push(b'\\');
+			json.push(c);
 		}
-		index += 1;
 	}
-	*json += &string[start_index..];
-	json.push('"');
+	json.extend_from_slice(string[start_index..].as_bytes());
+	json.push(b'"');
 }
-fn write_json_value(value: &JSONValue, json: &mut String) {
+fn write_json_value(value: &JSONValue, json: &mut Vec<u8>) {
 	use JSONValue::*;
 
 	match value {
-		Null => *json += "null",
-		Boolean(false) => *json += "false",
-		Boolean(true) => *json += "true",
-		Number(number) => *json += &*number.to_string(),
+		Null => json.extend_from_slice(b"null"),
+		Boolean(boolean) => json.extend_from_slice(boolean.to_string().as_bytes()),
+		Number(number) => {
+			if !number.is_finite() { panic!("{} is not finite", number) }
+			json.extend_from_slice(number.to_string().as_bytes());
+		},
 		String(string) => write_string(string, json),
 		Array(array) => {
-			json.push('[');
+			json.push(b'[');
 			for (i, value) in array.iter().enumerate() {
-				if i > 0 { json.push(',') }
+				if i > 0 { json.push(b',') }
 				write_json_value(value, json);
 			}
-			json.push(']');
+			json.push(b']');
 		},
 		Object(object) => {
-			json.push('{');
-			for (i, (key, value)) in object.iter().enumerate() {
-				if i > 0 { json.push(',') }
+			json.push(b'{');
+			let mut keys: Vec<_> = object.keys().map(|k| &**k).collect();
+			keys.sort_unstable(); // sort keys to make serialization deterministic
+			for (i, key) in keys.into_iter().enumerate() {
+				if i > 0 { json.push(b',') }
 				write_string(key, json);
-				json.push(':');
-				write_json_value(value, json);
+				json.push(b':');
+				write_json_value(&object[key], json);
 			}
-			json.push('}');
-		}
+			json.push(b'}');
+		},
 	}
 }
-pub fn to_json(value: &JSONValue) -> String {
-	let mut json = String::new();
+pub fn to_json(value: &JSONValue) -> Box<str> {
+	let mut json = vec![];
 	write_json_value(value, &mut json);
-	json
+	unsafe { String::from_utf8_unchecked(json) }.into()
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use JSONValue::*;
+	use std::f64;
 
 	macro_rules! map(
 		{ $($key:expr => $value:expr),* } => {
@@ -454,10 +305,10 @@ mod tests {
 		assert_eq!(from_json(" \n\r\t123"), Ok(Number(123.0)));
 		assert_eq!(from_json("123 \n\r\t"), Ok(Number(123.0)));
 		assert_eq!(from_json(" \n\r\t123 \n\r\t"), Ok(Number(123.0)));
-		assert_eq!(from_json(" [ ] "), Ok(Array(vec![])));
+		assert_eq!(from_json(" [ ] "), Ok(Array(Box::new([]))));
 		assert_eq!(
 			from_json(" [ \"abc\" , 123 ] "),
-			Ok(Array(vec![String("abc".into()), Number(123.0)]))
+			Ok(Array(Box::new([String("abc".into()), Number(123.0)])))
 		);
 		assert_eq!(
 			from_json(" { \"abc\" : 123 , \"\" : null } "),
@@ -467,13 +318,13 @@ mod tests {
 
 	#[test]
 	fn test_array() {
-		assert_eq!(from_json("[]"), Ok(Array(vec![])));
-		assert_eq!(from_json("[1]"), Ok(Array(vec![Number(1.0)])));
-		assert_eq!(from_json("[1,[true,\"3\"],4]"), Ok(Array(vec![
+		assert_eq!(from_json("[]"), Ok(Array(Box::new([]))));
+		assert_eq!(from_json("[1]"), Ok(Array(Box::new([Number(1.0)]))));
+		assert_eq!(from_json("[1,[true,\"3\"],4]"), Ok(Array(Box::new([
 			Number(1.0),
-			Array(vec![Boolean(true), String("3".into())]),
+			Array(Box::new([Boolean(true), String("3".into())])),
 			Number(4.0),
-		])));
+		]))));
 	}
 
 	#[test]
@@ -484,7 +335,7 @@ mod tests {
 			from_json("{\"a\":1,\"b\":[\"c\",null,{\"2\":3}],\"d\\ne\":{\"\":{},\"fgh\": \"\"}}"),
 			Ok(Object(map!{
 				"a" => Number(1.0),
-				"b" => Array(vec![String("c".into()), Null, Object(map!{"2" => Number(3.0)})]),
+				"b" => Array(Box::new([String("c".into()), Null, Object(map!{"2" => Number(3.0)})])),
 				"d\ne" => Object(map!{"" => Object(map!{}), "fgh" => String("".into())})
 			}))
 		);
@@ -649,13 +500,13 @@ mod tests {
 			"version" => String("3.7.0".into()),
 			"license" => String("Apache-2.0".into()),
 			"description" => String("TypeScript is a language for application scale JavaScript development".into()),
-			"keywords" => Array(vec![
+			"keywords" => Array(Box::new([
 				String("TypeScript".into()),
 				String("Microsoft".into()),
 				String("compiler".into()),
 				String("language".into()),
 				String("javascript".into()),
-			]),
+			])),
 			"bugs" => Object(map!{
 				"url" => String("https://github.com/Microsoft/TypeScript/issues".into())
 			}),
@@ -757,6 +608,51 @@ mod tests {
 				"@microsoft/typescript-etw" => Boolean(false)
 			})
 		})));
-		assert_eq!(from_json_recursive(SAMPLE_JSON), from_json(SAMPLE_JSON));
+	}
+
+	#[test]
+	fn test_to_json() {
+		assert_eq!(to_json(&Null), "null".into());
+		assert_eq!(to_json(&Boolean(false)), "false".into());
+		assert_eq!(to_json(&Boolean(true)), "true".into());
+		assert_eq!(to_json(&Number(123.0)), "123".into());
+		assert_eq!(to_json(&Number(-123.0)), "-123".into());
+		assert_eq!(to_json(&Number(123.456)), "123.456".into());
+		assert_eq!(to_json(&String("".into())), "\"\"".into());
+		assert_eq!(to_json(&String("1\\2\"\\def".into())), "\"1\\\\2\\\"\\\\def\"".into());
+		assert_eq!(to_json(&Array(Box::new([]))), "[]".into());
+		assert_eq!(to_json(&Array(Box::new([
+			Number(1.0),
+			Array(Box::new([Boolean(true)])),
+			String("abc".into()),
+		]))), "[1,[true],\"abc\"]".into());
+		assert_eq!(to_json(&Object(map!{})), "{}".into());
+		assert_eq!(to_json(&Object(map!{"1" => Number(2.0)})), "{\"1\":2}".into());
+		assert_eq!(to_json(&Object(map!{
+			"" => String("abc".into()),
+			"a\\b\"c" => Array(Box::new([Null, Object(map!{"d" => String("e".into())})])),
+			"fff" => Boolean(false)
+		})), "{\"\":\"abc\",\"a\\\\b\\\"c\":[null,{\"d\":\"e\"}],\"fff\":false}".into());
+
+		let sample_value = from_json(SAMPLE_JSON).unwrap();
+		assert_eq!(sample_value, from_json(&to_json(&sample_value)).unwrap());
+	}
+
+	#[test]
+	#[should_panic(expected = "NaN is not finite")]
+	fn test_to_json_nan() {
+		to_json(&Number(f64::NAN));
+	}
+
+	#[test]
+	#[should_panic(expected = "inf is not finite")]
+	fn test_to_json_infinity() {
+		to_json(&Number(f64::INFINITY));
+	}
+
+	#[test]
+	#[should_panic(expected = "-inf is not finite")]
+	fn test_to_json_neg_infinity() {
+		to_json(&Number(f64::NEG_INFINITY));
 	}
 }
